@@ -8,7 +8,8 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
     ContextTypes, ChatMemberHandler
 )
-
+import sys
+print(f"✅ Python version: {sys.version}")
 # ---------- READ KEYS FROM ENVIRONMENT ----------
 TOKEN = os.getenv("TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
