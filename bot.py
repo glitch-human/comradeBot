@@ -13,6 +13,8 @@ from telegram.ext import (
 TOKEN = os.getenv("TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")   # e.g. https://comradebot.onrender.com
+PORT = int(os.getenv("PORT", 8080))
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
@@ -173,7 +175,7 @@ async def enable_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Я жив! Добавьте меня как админа с правом 'Restrict Members'.")
 
-# ---------- MAIN ----------
+# ---------- MAIN (Webhook or Polling) ----------
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(ChatMemberHandler(track_chat_members, ChatMemberHandler.MY_CHAT_MEMBER))
@@ -182,7 +184,18 @@ def main():
     app.add_handler(CommandHandler("enable_bot", enable_bot))
     app.add_handler(MessageHandler(filters.Sticker.ALL, check_sticker))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    if WEBHOOK_URL:
+        logger.info(f"🚀 Starting bot with WEBHOOK on {WEBHOOK_URL}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=WEBHOOK_URL,
+            allowed_updates=Update.ALL_TYPES
+        )
+    else:
+        logger.info("🔄 Starting bot with POLLING (local mode)")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
