@@ -10,6 +10,7 @@ from telegram.ext import (
 )
 import sys
 print(f"✅ Python version: {sys.version}")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 # ---------- READ KEYS FROM ENVIRONMENT ----------
 TOKEN = os.getenv("TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
@@ -19,8 +20,8 @@ PORT = int(os.getenv("PORT", 8080))
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-vision_model = genai.GenerativeModel('gemini-1.5-flash')
-chat_model = genai.GenerativeModel('gemini-1.5-flash')
+vision_model = genai.GenerativeModel('gemini-2.0-flash')
+chat_model = genai.GenerativeModel('gemini-2.0-flash')
 
 MUTE_DURATION = 300  # 5 minutes
 SPAM_LIMIT = 5
