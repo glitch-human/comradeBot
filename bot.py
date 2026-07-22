@@ -10,22 +10,71 @@ from telegram.ext import (
     ContextTypes, ChatMemberHandler
 )
 
-# ---------- READ KEYS FROM ENVIRONMENT ----------
+# ---------- CONFIG ----------
 TOKEN = os.getenv("TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8080))
 
-# ---------- CONFIGURE GEMINI ----------
-genai.configure(api_key=GEMINI_API_KEY)
+# --------------------------
+#  AI SETUP (with fallback)
+# --------------------------
+USE_AI = False  # will be set to True if Gemini initialises successfully
 
-# Use the latest stable free model
-MODEL_NAME = "gemini-2.0-flash"
-vision_model = genai.GenerativeModel(MODEL_NAME)
-chat_model = genai.GenerativeModel(MODEL_NAME)
+try:
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY is not set")
+    genai.configure(api_key=GEMINI_API_KEY)
+    # Try the most common free model – we'll catch errors later
+    MODEL_NAME = "gemini-1.5-flash"
+    vision_model = genai.GenerativeModel(MODEL_NAME)
+    chat_model = genai.GenerativeModel(MODEL_NAME)
+    # Test the model with a simple prompt
+    test_response = chat_model.generate_content("Say OK")
+    if test_response and test_response.text:
+        USE_AI = True
+        logging.info(f"✅ Gemini model {MODEL_NAME} is ready.")
+    else:
+        logging.warning("Gemini test produced empty response – AI will be disabled.")
+except Exception as e:
+    logging.error(f"Gemini initialisation failed: {e}. AI will be disabled.")
 
-# ---------- CONFIG ----------
+# ---------- RULE-BASED FALLBACK (Russian only) ----------
+import random
+
+RUSSIAN_RESPONSES = [
+    "Привет! Как дела?",
+    "Я тебя слушаю.",
+    "Расскажи подробнее.",
+    "Понял!",
+    "Хорошо, я запомнил.",
+    "Можешь повторить?",
+    "Интересно!",
+    "Да, конечно.",
+    "Нет, не согласен.",
+    "Отлично!",
+    "Спасибо за сообщение.",
+    "Я здесь, чтобы помочь.",
+    "Что-то я не понял. Повтори, пожалуйста.",
+]
+
+def get_russian_fallback(user_message: str) -> str:
+    """Generate a simple Russian reply based on keywords."""
+    msg = user_message.lower()
+    if "привет" in msg or "здравствуй" in msg:
+        return "Привет! Как у тебя дела?"
+    if "как дела" in msg or "как жизнь" in msg:
+        return "У меня всё отлично! А у тебя?"
+    if "спасибо" in msg or "благодарю" in msg:
+        return "Пожалуйста! Всегда рад помочь."
+    if "пока" in msg or "до свидания" in msg:
+        return "До встречи! Хорошего дня."
+    if "помощь" in msg or "помоги" in msg:
+        return "Конечно, я здесь, чтобы помочь. Что случилось?"
+    return random.choice(RUSSIAN_RESPONSES)
+
+# ---------- OTHER SETTINGS ----------
 MUTE_DURATION = 300  # 5 minutes
 SPAM_LIMIT = 5
 SPAM_WINDOW = 10
@@ -33,13 +82,12 @@ SPAM_WINDOW = 10
 BOT_DISABLED = False
 user_activity = {}
 
-# ---------- LOGGING ----------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-logging.getLogger("httpx").setLevel(logging.WARNING)  # Hide token from logs
+logging.getLogger("httpx").setLevel(logging.WARNING)  # hide token in logs
 
 # ---------- UNMUTE ----------
 async def unmute_user(context: ContextTypes.DEFAULT_TYPE):
@@ -75,7 +123,7 @@ def is_spam(user_id: int) -> bool:
         return False
     return (now - user_activity[user_id][0]) <= SPAM_WINDOW
 
-# ---------- MUTE (Russian warning) ----------
+# ---------- MUTE ----------
 async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE, reason: str):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -92,7 +140,7 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE, reason: 
     except Exception as e:
         logger.error(f"Failed to mute: {e}")
 
-# ---------- STICKER VISION ----------
+# ---------- STICKER MODERATION ----------
 async def check_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BOT_DISABLED
     if BOT_DISABLED or update.effective_user.id == OWNER_ID:
@@ -104,6 +152,11 @@ async def check_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sticker = update.message.sticker
     if not sticker:
         return
+
+    if not USE_AI:
+        # If AI is off, we can't check stickers – just ignore
+        return
+
     try:
         file = await context.bot.get_file(sticker.file_id)
         file_bytes = await file.download_as_bytearray()
@@ -118,11 +171,10 @@ async def check_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Sticker vision failed: {e}")
 
-# ---------- TEXT MODERATION & CHAT (FIXED) ----------
+# ---------- MAIN MESSAGE HANDLER ----------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BOT_DISABLED
 
-    # 1. SAFETY CHECKS
     if BOT_DISABLED:
         return
     if not update.message or not update.message.text:
@@ -130,67 +182,66 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
-    user_message = update.message.text
+    user_message = update.message.text.strip()
 
-    logger.info(f"📩 Message from {user_name} ({user_id}): {user_message[:50]}")
+    logger.info(f"📩 From {user_name} ({user_id}): {user_message[:50]}")
 
-    # 2. MODERATION (Skip for owner)
+    # --- Moderation (skip owner) ---
     if user_id != OWNER_ID:
         if is_spam(user_id):
             await mute_user(update, context, "Спам сообщениями (5+ за 10 сек)")
             return
 
-        try:
-            mod_prompt = f"""Rules: No profanity, hate, bullying, spam, NSFW. 
+        if USE_AI:
+            try:
+                mod_prompt = f"""Rules: No profanity, hate, bullying, spam, NSFW. 
 If the text breaks ANY rule, reply ONLY with 'MUTE: <short reason>'. 
 If it is completely safe, reply ONLY with 'SAFE'.
 Text: {user_message}"""
+                mod_response = chat_model.generate_content(mod_prompt)
+                result = mod_response.text.strip()
+                logger.info(f"🛡️ Moderation: {result}")
 
-            mod_response = chat_model.generate_content(mod_prompt)
-            result = mod_response.text.strip()
-            logger.info(f"🛡️ Moderation result: {result}")
+                if "MUTE:" in result.upper():
+                    reason = result.replace("MUTE:", "").strip()
+                    await mute_user(update, context, reason)
+                    return
+                elif "SAFE" not in result.upper():
+                    logger.warning(f"Unclear moderation result: {result}")
+            except Exception as e:
+                logger.error(f"Moderation error: {e}")
 
-            if "MUTE:" in result.upper():
-                reason = result.replace("MUTE:", "").strip()
-                await mute_user(update, context, reason)
-                return
-            elif "SAFE" not in result.upper():
-                # If the AI is confused, assume safe but log it
-                logger.warning(f"Moderation returned unexpected result: {result}")
-                # Don't return, proceed to chat
+    # --- Generate reply ---
+    reply = None
 
-        except Exception as e:
-            logger.error(f"Moderation check failed: {e}")
-            # Don't return, proceed to chat
-
-    # 3. CHAT REPLY (ALWAYS sends something)
-    try:
-        chat_prompt = f"""
-You are a friendly, concise Telegram assistant. 
-Keep replies VERY SHORT (1-2 sentences max!).
-Be empathetic and casual.
-If asked about health, give brief safe advice and recommend a doctor.
+    if USE_AI:
+        try:
+            # Ask Gemini for a short reply in the same language
+            chat_prompt = f"""
+You are a friendly, concise Telegram assistant.
+Keep replies VERY SHORT (1-2 sentences).
+Be empathetic, casual.
+If health advice is requested, give brief safe tips and recommend a doctor.
 ALWAYS reply in the EXACT SAME LANGUAGE as the user's last message.
 
 User: {user_message}
 Assistant:"""
+            chat_response = chat_model.generate_content(chat_prompt)
+            reply = chat_response.text.strip()
+            logger.info(f"🤖 AI reply: {reply[:50]}...")
+        except Exception as e:
+            logger.error(f"AI chat error: {e}")
 
-        chat_response = chat_model.generate_content(chat_prompt)
-        reply = chat_response.text.strip()
+    # --- Fallback if AI didn't produce a reply ---
+    if not reply:
+        reply = get_russian_fallback(user_message)
+        logger.info(f"🔄 Fallback reply: {reply}")
 
-        # 4. FALLBACK: If AI returns empty, send a default message
-        if not reply:
-            reply = "🤖 I'm listening! Say something else?"
-
-        logger.info(f"🤖 Reply: {reply[:50]}...")
-
-        # Send the reply
+    # --- Send the reply ---
+    try:
         await update.message.reply_text(reply)
-
     except Exception as e:
-        logger.error(f"Chat reply failed: {e}")
-        # ULTIMATE FALLBACK: If everything crashes, send this
-        await update.message.reply_text("🤖 I'm here! Try again.")
+        logger.error(f"Failed to send message: {e}")
 
 # ---------- GROUP ACCESS ----------
 async def track_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -203,9 +254,15 @@ async def track_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await context.bot.send_message(update.effective_chat.id, "❌ Только владелец может добавить меня. Пока!")
             await context.bot.leave_chat(update.effective_chat.id)
         else:
-            await context.bot.send_message(update.effective_chat.id, "🤖 Привет! Я ваш бесплатный AI-друг и модератор!")
+            await context.bot.send_message(update.effective_chat.id, "🤖 Привет! Я ваш AI-друг и модератор.")
 
-# ---------- OWNER COMMANDS ----------
+# ---------- COMMANDS ----------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 Я жив! Добавьте меня как админа с правом 'Restrict Members'.")
+
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🏓 Pong! Бот работает.")
+
 async def disable_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global BOT_DISABLED
     if update.effective_user.id != OWNER_ID:
@@ -220,25 +277,19 @@ async def enable_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     BOT_DISABLED = False
     await update.message.reply_text("✅ Бот включён.")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Я жив! Добавьте меня как админа с правом 'Restrict Members'.")
-
-async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏓 Pong! I am alive!")
-
 # ---------- MAIN ----------
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(ChatMemberHandler(track_chat_members, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("ping", ping))  # <-- NEW: Test command
+    app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("disable_bot", disable_bot))
     app.add_handler(CommandHandler("enable_bot", enable_bot))
     app.add_handler(MessageHandler(filters.Sticker.ALL, check_sticker))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     if WEBHOOK_URL:
-        logger.info(f"🚀 Starting bot with WEBHOOK on {WEBHOOK_URL}")
+        logger.info(f"🚀 Starting webhook on {WEBHOOK_URL}")
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
@@ -246,9 +297,9 @@ def main():
             allowed_updates=Update.ALL_TYPES
         )
     else:
-        logger.info("🔄 Starting bot with POLLING (local mode)")
+        logger.info("🔄 Starting polling (local)")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    print(f"✅ Python version: {sys.version}")
+    print(f"Python version: {sys.version}")
     main()
